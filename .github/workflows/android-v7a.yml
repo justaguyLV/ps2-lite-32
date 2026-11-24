@@ -1,0 +1,111 @@
+name: Android armeabi-v7a
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: platforms/android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install NDK + CMake
+        run: yes | sdkmanager "ndk;29.0.14206865" "cmake;3.31.6" >/dev/null || true
+      - name: Make ninja keep going after errors
+        run: |
+          B=$ANDROID_HOME/cmake/3.31.6/bin
+          mv $B/ninja $B/ninja.real
+          printf '#!/bin/sh\nexec %s/ninja.real -k 0 "$@"\n' "$B" > $B/ninja
+          chmod +x $B/ninja
+      - name: Fetch shaderc deps
+        run: python3 app/src/main/cpp/3rdparty/shaderc/utils/git-sync-deps
+      - name: Rust target
+        run: rustup target add armv7-linux-androideabi
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -o pipefail
+          for i in 1 2 3 4; do
+            ./gradlew :app:assemblePlayDebug --stacktrace 2>&1 | tee -a /tmp/build.log && exit 0
+            if tail -n 400 /tmp/build.log | grep -q "Could not find\|Could not resolve\|Could not GET"; then
+              echo "Dependency download failed, retry $i"; sleep 45
+            else
+              exit 1
+            fi
+          done
+          exit 1
+      - name: Keep unstripped emucore for symbolizing crashes
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p /tmp/sym
+          : > /tmp/sym/ids.txt
+          for f in $(find "$GITHUB_WORKSPACE/platforms/android/app/build" -name 'libemucore_4k.so' -path '*armeabi-v7a*' 2>/dev/null); do
+            n=$(readelf -S "$f" | grep -c '\.symtab' || true)
+            echo "$f buildid=$(readelf -n "$f" | grep 'Build ID' | awk '{print $3}') symtab=$n size=$(stat -c %s "$f")" >> /tmp/sym/ids.txt
+            if [ "$n" -gt 0 ] && [ ! -f /tmp/sym/libemucore_4k.so ]; then cp "$f" /tmp/sym/libemucore_4k.so; fi
+          done
+          cat /tmp/sym/ids.txt
+      - name: Upload unstripped emucore
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emucore-unstripped
+          path: /tmp/sym/libemucore_4k.so
+          if-no-files-found: warn
+      - name: Publish log tail to buildlogs branch
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir /tmp/out
+          grep -E "error:|CMake Error|undefined reference|undefined symbol|fatal error|referenced by" /tmp/build.log | sed 's#/home/runner/work/ps2-lite-32/ps2-lite-32/##' | cut -c1-260 | sort | uniq -c | sort -rn | head -250 > /tmp/out/errors.txt || true
+          tail -n 120 /tmp/build.log > /tmp/out/tail.txt || true
+          cp /tmp/sym/ids.txt /tmp/out/ids.txt || true
+          git config user.name ci; git config user.email ci@example.com
+          git checkout --orphan buildlogs
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/out/* .
+          git add errors.txt tail.txt ids.txt
+          git commit -qm "log for ${GITHUB_SHA}"
+          git push -f origin buildlogs
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: armsx2-android-v7a
+          path: platforms/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
+  release:
+    needs: build
+    if: success() && !contains(github.event.head_commit.message, '[no-release]')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: armsx2-android-v7a
+          path: apk
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=$(find apk -name '*.apk' | head -n1)
+          cp "$APK" ARMSX2-armv7-interpreter-debug.apk
+          gh release create "v7a-build-${{ github.run_number }}" ARMSX2-armv7-interpreter-debug.apk \
+            --repo "${{ github.repository }}" \
+            --title "ARMSX2 ARMv7 build ${{ github.run_number }}" \
+            --notes "Experimental 32-bit ARM build, interpreter only. Commit ${{ github.sha }}." \
+            --prerelease

@@ -1,0 +1,51 @@
+name: Symbolize crash addresses
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id that produced the crashing APK"
+        required: true
+      addresses:
+        description: "Space separated hex offsets inside libemucore_4k.so"
+        required: true
+permissions:
+  contents: write
+  actions: read
+jobs:
+  symbolize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: emucore-unstripped
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: sym
+      - name: Resolve
+        shell: bash
+        run: |
+          set -x
+          A2L=$(ls $ANDROID_HOME/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-addr2line | head -n1)
+          mkdir -p /tmp/out
+          {
+            readelf -n sym/libemucore_4k.so | grep 'Build ID'
+            for a in ${{ inputs.addresses }}; do
+              echo "== 0x$a"
+              $A2L -f -C -i -e sym/libemucore_4k.so 0x$a || true
+              b=$(printf '%x' $((0x$a - 1)))
+              echo "-- 0x$b (pc-1)"
+              $A2L -f -C -i -e sym/libemucore_4k.so 0x$b || true
+            done
+          } > /tmp/out/symbols.txt
+          cat /tmp/out/symbols.txt
+      - name: Publish to symbols branch
+        shell: bash
+        run: |
+          git config user.name ci; git config user.email ci@example.com
+          git checkout --orphan symbols
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/out/symbols.txt .
+          git add symbols.txt
+          git commit -qm "symbols for run ${{ inputs.run_id }}"
+          git push -f origin symbols

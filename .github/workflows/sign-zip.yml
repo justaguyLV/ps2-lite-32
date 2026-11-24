@@ -1,0 +1,63 @@
+name: Sign zip
+# Put any .zip in to-sign/ (or run manually). Signed output lands on the `signed` branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['to-sign/**']
+permissions:
+  contents: write
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install build-tools
+        run: yes | sdkmanager "build-tools;35.0.0" >/dev/null || true
+      - name: Sign
+        shell: bash
+        run: |
+          set -eo pipefail
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          KS=signing/release.p12; PASS=armsx2pass
+          mkdir -p out work
+          shopt -s nullglob
+          for z in to-sign/*.zip; do
+            name=$(basename "$z" .zip)
+            if unzip -l "$z" | grep -q " AndroidManifest.xml$"; then
+              # the zip itself is an APK
+              cp "$z" "work/$name.apk"
+              $BT/zipalign -f -p 4 "work/$name.apk" "work/$name.aligned.apk"
+              $BT/apksigner sign --ks $KS --ks-type PKCS12 --ks-pass pass:$PASS --ks-key-alias armsx2 --out "out/$name.apk" "work/$name.aligned.apk"
+              continue
+            fi
+            rm -rf "work/$name"; mkdir -p "work/$name"; unzip -q "$z" -d "work/$name"
+            found=0
+            while IFS= read -r apk; do
+              found=1
+              b=$(basename "$apk" .apk)
+              $BT/zipalign -f -p 4 "$apk" "work/$b.aligned.apk"
+              $BT/apksigner sign --ks $KS --ks-type PKCS12 --ks-pass pass:$PASS --ks-key-alias armsx2 --out "out/$b-signed.apk" "work/$b.aligned.apk"
+            done < <(find "work/$name" -name '*.apk')
+            if [ $found = 0 ]; then
+              cp "$z" "out/$name-signed.zip"
+              jarsigner -keystore $KS -storetype PKCS12 -storepass $PASS "out/$name-signed.zip" armsx2
+            fi
+          done
+          ls -la out
+      - name: Publish to signed branch
+        shell: bash
+        run: |
+          git config user.name ci; git config user.email ci@example.com
+          cp -r out /tmp/out
+          git checkout --orphan signed
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/out/* .
+          git add -A
+          git commit -qm "signed outputs"
+          git push -f origin signed

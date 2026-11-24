@@ -1,0 +1,36 @@
+name: Publish release from build
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to publish"
+        required: true
+      tag:
+        description: "Release tag"
+        required: true
+        default: "v7a-interpreter-1"
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: armsx2-android-v7a
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: apk
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          find apk -name '*.apk' | head
+          APK=$(find apk -name '*.apk' | head -n1)
+          cp "$APK" ARMSX2-armv7-interpreter-debug.apk
+          gh release create "${{ inputs.tag }}" ARMSX2-armv7-interpreter-debug.apk \
+            --repo "${{ github.repository }}" \
+            --title "ARMSX2 ARMv7 (32-bit) - interpreter only, experimental" \
+            --notes "Experimental 32-bit ARM build. Interpreter only (no JIT), so it is very slow. Debug APK, untested on device." \
+            --prerelease
