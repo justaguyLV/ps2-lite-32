@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: armsx2-android-v7a
           run-id: ${{ inputs.run_id }}
